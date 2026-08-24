@@ -60,6 +60,9 @@ flash:
 ./tqv.py flash prebuilt/pwl_tui.bin
 ```
 
+Alternately you can use Michael Bell's browser based interface to flash your
+board:  https://program.tinyqv.com
+
 `flash` writes the image, verifies it, starts the design, and attaches your
 terminal to the chip's console. After a moment you'll see:
 
