@@ -1,5 +1,5 @@
 /************************************************************************************
- * app/f1000/tui/Tabs.h
+ * tui/Tabs.h
  *
  *   Copyright (C) 2019 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>

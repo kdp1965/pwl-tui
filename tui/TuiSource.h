@@ -1,5 +1,5 @@
 /************************************************************************************
- * app/f1000/merlin/TuiSource.h
+ * tui/TuiSource.h
  *
  *   Copyright (C) 2019 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>

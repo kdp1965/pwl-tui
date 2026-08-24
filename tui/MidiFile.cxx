@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/MidiFile.cxx
+ * tui/MidiFile.cxx
  *
  * Standard MIDI file parsing.  See MidiFile.h.
  *

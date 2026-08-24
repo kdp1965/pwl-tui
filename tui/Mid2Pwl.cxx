@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/Mid2Pwl.cxx
+ * tui/Mid2Pwl.cxx
  *
  * See Mid2Pwl.h.  Times are uint32 ms throughout (mid2pwl.py works in
  * float seconds; the comparisons port 1:1 with 0.01s -> 10ms etc).

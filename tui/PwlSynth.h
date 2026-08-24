@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/PwlSynth.h
+ * tui/PwlSynth.h
  *
  * CPwlSynth: the CTuiSource behind the PWL synth debug TUI on TinyQV.
  *

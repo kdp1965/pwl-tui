@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/Mid2Pwl.h
+ * tui/Mid2Pwl.h
  *
  * On-target port of tools/mid2pwl.py: reduce a parsed MIDI file (the
  * notes CMidiFile retains) onto the synth's 4 voices as a seq_ev_t

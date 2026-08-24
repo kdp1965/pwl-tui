@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/MidiFile.h
+ * tui/MidiFile.h
  *
  * Standard MIDI file reader for the TUI's "open <file>.mid" tab.
  *

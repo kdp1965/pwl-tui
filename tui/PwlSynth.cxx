@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/PwlSynth.cxx
+ * tui/PwlSynth.cxx
  *
  * CPwlSynth: CTuiSource implementation for the TT Sky 25a PiecewiseOrion
  * synth (pwl_synth, peripheral 33) on TinyQV.  See PwlSynth.h for the

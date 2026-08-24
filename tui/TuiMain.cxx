@@ -1,5 +1,5 @@
 /************************************************************************************
- * pwl-test/tui/TuiMain.cxx
+ * tui/TuiMain.cxx
  *
  * Entry point for the 'tui' console command: builds the CPwlSynth source
  * and the CTui screen, runs the (single threaded) UI loop until the user

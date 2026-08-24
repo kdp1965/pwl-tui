@@ -1,5 +1,5 @@
 /************************************************************************************
- * app/f1000/merlin/History.h
+ * tui/History.h
  *
  *   Copyright (C) 2019 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>

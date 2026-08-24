@@ -1,5 +1,5 @@
 /************************************************************************************
- * app/f1000/tui/CTabs.cxx
+ * tui/CTabs.cxx
  *
  *   Copyright (C) 2019 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>
