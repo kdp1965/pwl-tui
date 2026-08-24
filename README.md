@@ -49,7 +49,7 @@ piano decay, or tubular bells ring.
 Clone the repo (the SDK submodule is optional unless you build from source):
 
 ```sh
-git clone https://github.com/kpettit-kii/pwl-tui.git
+git clone https://github.com/kdp1965/pwl-tui.git
 cd pwl-tui
 ```
 
