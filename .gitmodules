@@ -1,0 +1,3 @@
+[submodule "tinyQV-sdk"]
+	path = tinyQV-sdk
+	url = https://github.com/MichaelBell/tinyQV-sdk
