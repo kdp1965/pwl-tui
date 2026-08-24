@@ -63,7 +63,7 @@ flash:
 Alternately you can use Michael Bell's browser based interface to flash your
 board:  https://program.tinyqv.com
 
-`flash` writes the image, verifies it, starts the design, and attaches your
+The `flash` argument to tqv.py writes the image, verifies it, starts the design, and attaches your
 terminal to the chip's console. After a moment you'll see:
 
 ```
@@ -72,7 +72,7 @@ type 'help' for commands
 pwl>
 ```
 
-You are now typing at a RISC-V CPU on the tapeout. Try:
+You are now typing in a RISC-V CPU console app on the tapeout. Try:
 
 ```
 pwl> demo 16
