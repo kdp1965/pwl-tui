@@ -1,5 +1,5 @@
 /************************************************************************************
- * apps/system/termcurses/tcurses_priv.h
+ * tui/termcurses/tcurses_priv.h
  *
  *   Copyright (C) 2018 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>

@@ -1,5 +1,5 @@
 /************************************************************************************
- * drivers/termcurses/tcurses_vt100.c
+ * tui/termcurses/tcurses_vt100.c
  *
  *   Copyright (C) 2018 Ken Pettit. All rights reserved.
  *   Author: Ken Pettit <pettitkd@gmail.com>
