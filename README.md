@@ -16,6 +16,8 @@ and slides), timbre envelopes (bow bite, bell strikes), vibrato, legato
 slurring, and a chord arpeggiator — enough to make a saxophone scoop, a
 piano decay, or tubular bells ring.
 
+[![pwl-tui running on the chip: A MIDO song tab, watch window, and command console](PWL-TUI.png)](PWL-TUI.png)
+
 ---
 
 ## 1. What you need
