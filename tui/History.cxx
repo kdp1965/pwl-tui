@@ -38,6 +38,43 @@
 #define NULL  0
 #endif
 
+/* Byte-at-a-time string ops for buffers at ARBITRARY alignment.
+ *
+ * newlib's optimized strcpy/strcmp/strlen read a word at a time, and
+ * this core's unaligned word loads do not return what they expect: a
+ * history value parsed out of "HISTORY_10=..." starts at an ODD line
+ * offset, and newlib's strcpy saw a phantom NUL in the misread word and
+ * stopped after exactly three characters.  That is why every entry
+ * numbered 10 and up came back as its first three letters ("ope",
+ * "clo") while entries 0-9 survived - the one-digit prefix leaves the
+ * value at an even offset.  Same erratum the VT100 key decoder hit
+ * (tc_streq in tcurses_vt100.c).
+ */
+static int h_strlen(const char *p)
+{
+  int n = 0;
+
+  while (p[n] != '\0')
+    n++;
+  return n;
+}
+
+static void h_strcpy(char *dst, const char *src)
+{
+  while ((*dst++ = *src++) != '\0')
+    ;
+}
+
+static int h_streq(const char *a, const char *b)
+{
+  while (*a != '\0' && *a == *b)
+  {
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
 /*
 ==============================================================================
 CHistory class constructor
@@ -168,7 +205,7 @@ void CHistory::Add(const char *pCmd)
   /* Test if this command matches the last command */
   if (m_Count > 0 && m_FirstItemIndex != -1)
   {
-    if (strcmp(pCmd, m_pHistory[m_FirstItemIndex]) == 0)
+    if (h_streq(pCmd, m_pHistory[m_FirstItemIndex]))
       return;
   }
 
@@ -185,8 +222,8 @@ void CHistory::Add(const char *pCmd)
   }
 
   /* Add item at m_FirstItemIndex */
-  m_pHistory[addIndex] = new char[strlen(pCmd) + 1];
-  strcpy(m_pHistory[addIndex], pCmd);
+  m_pHistory[addIndex] = new char[h_strlen(pCmd) + 1];
+  h_strcpy(m_pHistory[addIndex], pCmd);
 
   /* Increment the count if it is less than our max */
   if (m_Count < MAX_HISTORY_ITEMS)
