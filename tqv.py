@@ -43,6 +43,7 @@ SECTOR_SIZE = 4096
 FLASH_SIZE = 16 * 1024 * 1024
 
 CTRL_A, CTRL_B, CTRL_C, CTRL_D, CTRL_Q = b"\x01", b"\x02", b"\x03", b"\x04", b"\x11"
+BAUD_MARK_RE = re.compile(rb"\x05TQVBAUD:(\d+)\x05")
 DETACH = 0x1D  # Ctrl-] quits this tool without disturbing the board
 
 # A MicroPython traceback anywhere in a reply means the step failed; without
@@ -357,9 +358,99 @@ class HostFs:
         raise OSError("no free handle")
 
 
+
+# MicroPython snippet appended after run_tinyqv.py: re-open the bridge
+# UARTs at a different baud rate WITHOUT touching the clock, reset or
+# design selection, so the design keeps running across the change.
+#
+# run_tinyqv.py builds its UARTs from the design clock (115200 at 64MHz)
+# and its bridge loop owns them for as long as the design runs, so a
+# faster link cannot be had by asking it - this is the same loop, minus
+# the reset, with the baud as an argument and deeper buffers to match.
+REBRIDGE_PAYLOAD = r"""
+def rebridge(baud):
+    import sys, uselect, micropython, time, gc, machine
+
+    # Retune the PL011s through their divisor registers: this build's
+    # machine.UART leaves RX permanently dead after any .init() or second
+    # construction (only the first object's IRQ plumbing works), so the
+    # UART objects run() rooted in globals stay in charge and only the
+    # baud divisor changes underneath them.  uartclk is 48MHz (clk_peri:
+    # IBRD/FBRD read back 26+3/64 at 115200).
+    for u in (0x40070000, 0x40078000):          # UART0, UART1
+        div = 48000000 / (16.0 * baud)
+        ibrd = int(div)
+        fbrd = int((div - ibrd) * 64 + 0.5)
+        while machine.mem32[u + 0x18] & 8:      # UARTFR.BUSY
+            pass
+        cr = machine.mem32[u + 0x30]
+        machine.mem32[u + 0x30] = cr & ~1       # UARTEN off
+        machine.mem32[u + 0x24] = ibrd
+        machine.mem32[u + 0x28] = fbrd
+        machine.mem32[u + 0x2c] = machine.mem32[u + 0x2c]   # latch brds
+        machine.mem32[u + 0x30] = cr
+
+    uart_out, uart_in = _tqv_uart_out, _tqv_uart_in
+    time.sleep(0.05)
+    uart_in.read()                      # drop resync junk from the switch
+    gc.collect()                        # start the loop with a clean heap
+    print("TinyQV baud=%d" % baud)
+
+    try:
+        micropython.kbd_intr(-1)
+        poll = uselect.poll()
+        poll.register(sys.stdin, uselect.POLLIN)
+        CTRL_Q = 17
+        is_ctrl_q = False
+        stop = False
+
+        while not stop:
+            if poll.poll(0):
+                # One byte per read AND per write, fused into a single
+                # pass: the design has a single byte receiver and a
+                # per-byte RX interrupt costing ~7us on its fetch-bound
+                # core, so bytes must not arrive back to back at 1Mbaud
+                # (a batched write turned "cat prism.cfg" into "catism").
+                # The interpreter overhead of this loop IS the pacing
+                # (~60us/byte, ~15kB/s) - collecting into a batch first
+                # and then writing byte-wise paid that overhead twice.
+                n = 0
+                while n < 256:
+                    c = sys.stdin.buffer.read(1)
+                    if not c:
+                        break
+                    if is_ctrl_q:
+                        is_ctrl_q = False
+                        if c[0] == ord('q') or c[0] == ord('Q'):
+                            stop = True
+                            break
+                    elif c[0] == CTRL_Q:
+                        is_ctrl_q = True
+                        if not poll.poll(0):
+                            break
+                        continue
+                    uart_out.write(c)
+                    n += 1
+                    if not poll.poll(0):
+                        break
+                if stop:
+                    break
+
+            uart_data = uart_in.read(512)
+            while uart_data:
+                sys.stdout.buffer.write(uart_data)
+                uart_data = uart_in.read(512)
+    finally:
+        micropython.kbd_intr(3)
+        print("TinyQV stop")
+"""
+
+
 class Board:
     def __init__(self, port, verbose=False):
         self.port = port
+        self.baud = 115200          # design link rate; 'baud' can raise it
+        self.target = None          # (design, latency, freq_hz) once known
         self.buf = b""
         self.consumed = b""
         self.verbose = verbose
@@ -524,6 +615,39 @@ class Board:
     def leave_raw_repl(self):
         self.port.write(CTRL_B)
 
+    def boot_baud(self):
+        """The design's reset-divider link rate at the target clock.
+
+        The divider resets to 555 (115200 at 64MHz); at any other project
+        clock the same divider yields a proportionally scaled rate, which
+        run() already matches on this side when it builds the UARTs.
+        """
+        if self.target:
+            return int(round(115200 * self.target[2] / 64_000_000))
+        return 115200
+
+    def rebridge(self, baud):
+        """Re-open the host side of the link at `baud`.
+
+        Called after the design has switched its own divider.  The bridge
+        loop is stopped with its own Ctrl-Q q (which never reaches the
+        design) and restarted from REBRIDGE_PAYLOAD; the clock and reset
+        are untouched, so the design keeps running - and keeps whatever it
+        had in RAM - across the change.
+        """
+        self.port.write(CTRL_Q + b"q")
+        self.expect(rb"TinyQV stop", timeout=5.0,
+                    what="the bridge to stop for the baud change")
+        self.drain()
+        self.exec_raw(REBRIDGE_PAYLOAD)
+        time.sleep(0.2)
+        self.drain()
+        self.exec_raw("rebridge(%d)" % baud)
+        self.expect(rb"TinyQV baud=%d\b" % baud, timeout=10.0,
+                    what="the bridge to reopen at %d baud" % baud)
+        self.baud = baud
+
+
     def _console_send_song(self, interactive, stdin_fd, saved):
         # Called mid-console when the design prints the download marker.
         if not interactive:
@@ -625,7 +749,132 @@ class Board:
                 sys.stderr.flush()
         sys.stderr.write("\r-- 100%\n")
 
-    def console(self, settle=0.0):
+    def _probe_baud(self, baud):
+        """True if the design already talks at `baud` (clean prompt seen)."""
+        if baud == self.baud:
+            return False                 # no probe needed; ask normally
+        try:
+            self.rebridge(baud)
+        except BoardError:
+            return False
+        self.port.write(b"\r")
+        deadline = time.monotonic() + 0.8
+        got = b""
+        while time.monotonic() < deadline:
+            d = self.port.read(0.1)
+            if d:
+                got += d
+                if b"prism> " in got or b"> " in got[-8:]:
+                    return True
+        # Not there: return to the boot rate and let the command path run
+        try:
+            self.rebridge(self.boot_baud())
+        except BoardError:
+            pass
+        self.drain()
+        return False
+
+    def _console_set_baud(self, baud, interactive, stdin_fd, saved):
+        # Called mid-console when the design announces a baud change.  It
+        # drains its transmitter and switches its divider on its own; all
+        # that is left here is to reopen this side at the same rate.
+        if interactive:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved)
+        try:
+            time.sleep(0.2)         # let the design finish its own switch
+            self.rebridge(baud)
+
+            def prompt_at(rate):
+                self.port.write(b"\r")
+                deadline = time.monotonic() + 2.0
+                got = b""
+                while time.monotonic() < deadline:
+                    d = self.port.read(0.1)
+                    if d:
+                        got += d
+                        if b"> " in got[-8:]:
+                            return True
+                return False
+
+            if prompt_at(baud):
+                banner("link now at %d baud" % baud)
+            else:
+                # No prompt: the divider the design chose does not give
+                # this rate - almost always because it believes a clock
+                # ('clk N' / --freq N) it is not really running at.  If
+                # it is actually at the 64MHz default, its rate is off
+                # by exactly that ratio; meet it there, correct it, and
+                # redo the switch (the fresh marker re-enters here).
+                claimed = self.target[2] if self.target else 64_000_000
+                actual = int(round(baud * 64_000_000 / claimed))
+                healed = False
+                if actual != baud:
+                    self.rebridge(actual)
+                    if prompt_at(actual):
+                        banner("design is really at 64 MHz (answers at %d"
+                               " baud, not %d) - correcting" % (actual, baud))
+                        self.target = (self.target[0], self.target[1],
+                                       64_000_000)
+                        self.port.write(b"clk 64\r")
+                        time.sleep(0.4)
+                        self.port.write(b"baud %d\r" % baud)
+                        healed = True
+                if not healed:
+                    banner("no prompt at %d baud after the switch; check"
+                           " --freq against the design's real clock" % baud)
+        except BoardError as e:
+            banner("baud change failed: %s" % e)
+            try:
+                boot = self.boot_baud()
+                self.rebridge(boot)
+                banner("back at %d; the design may still be at %d -"
+                       " './tqv.py run' resets it" % (boot, baud))
+            except BoardError:
+                banner("could not reopen the link; run './tqv.py run'")
+        finally:
+            if interactive:
+                tty.setraw(stdin_fd)
+
+    def send_song(self, path):
+        """Stream a song file to a design waiting in its 'download' command.
+
+        The design expects {u32 'TQVD', u32 kind, u32 length, u32 crc32} +
+        payload, DLE stuffed (0x10/0x11/0x03 escaped) so the RP2350 UART
+        bridge's Ctrl-Q watcher and the SDK's Ctrl-C interrupt character
+        never see their trigger bytes.  Paced slightly under the 115200
+        wire rate; the design's 64KB receive buffer does the rest.
+        """
+        with open(path, "rb") as f:
+            blob = f.read()
+        kind, kname = song_kind(blob)
+        if kind is None:
+            raise BoardError("%s is not a recognized song blob (expected "
+                             "ADPCM or L4Z .bin from the tools)" % path)
+        hdr = struct.pack("<IIII", SONG_MAGIC, kind, len(blob),
+                          zlib.crc32(blob) & 0xFFFFFFFF)
+        payload = song_stuff(hdr + blob)
+        banner("sending %s song: %d bytes (%d on the wire, ~%ds)"
+               % (kname, len(blob), len(payload), len(payload) // 11000 + 1))
+        t0 = time.monotonic()
+        sent = 0
+        for i in range(0, len(payload), 512):
+            chunk = payload[i:i + 512]
+            self.port.write(chunk)
+            sent += len(chunk)
+            # echo the design's progress dots while pacing the stream
+            data = self.port.read(0)
+            if data:
+                os.write(1, data)
+            target = t0 + sent / 11000.0
+            now = time.monotonic()
+            if target > now:
+                time.sleep(target - now)
+            if i % (64 * 512) == 0:
+                sys.stderr.write("\r-- %3d%% " % (100 * sent // len(payload)))
+                sys.stderr.flush()
+        sys.stderr.write("\r-- 100%\n")
+
+    def console(self, settle=0.0, set_baud=None):
         """Bridge the terminal to the design's UART until detach or stop.
 
         `settle` waits that many seconds for the design's first output before
@@ -635,6 +884,7 @@ class Board:
         unlike a human typing, is fast enough to hit.
         """
         banner("Ctrl-Q q stops the design | Ctrl-] detaches and leaves it running")
+        self.baud = self.boot_baud()    # what a fresh boot talks at
         if settle:
             deadline = time.monotonic() + settle
             quiet_until = None
@@ -664,6 +914,80 @@ class Board:
             if pending:
                 os.write(1, pending)
             tail = pending[-32:]
+            clk_confirmed = True
+            if self.target and self.target[2] != 64_000_000:
+                # Tell the firmware its real clock so playback and baud
+                # math are right.  The design may still be booting (its
+                # UART RX comes up last, and bytes sent before that are
+                # lost), so poke for a prompt first - and if the bridge
+                # was left at some other rate by a dead session, re-open
+                # it at the likely rates until the design answers.
+                def poke():
+                    self.port.write(b"\r")
+                    deadline = time.monotonic() + 2.5
+                    got = b""
+                    while time.monotonic() < deadline:
+                        d = self.port.read(0.1)
+                        if d:
+                            if self.fs is not None:
+                                d = self.fs.feed(d)
+                            got += d
+                            if b"> " in got[-8:]:
+                                return True
+                    return False
+
+                mhz = int(round(self.target[2] / 1_000_000))
+                alive = poke()
+                if not alive:
+                    for rate in (self.boot_baud(), 115200):
+                        try:
+                            self.rebridge(rate)
+                        except BoardError:
+                            continue
+                        if poke():
+                            alive = True
+                            break
+                clk_confirmed = False
+                if alive:
+                    self.port.write(b"clk %d\r" % mhz)
+                    want = b"clock %d" % mhz
+                    deadline = time.monotonic() + 2.0
+                    got = b""
+                    while want not in got and time.monotonic() < deadline:
+                        d = self.port.read(0.1)
+                        if d:
+                            got += d
+                    clk_confirmed = want in got
+                if clk_confirmed:
+                    banner("design clock set to %d MHz" % mhz)
+                else:
+                    banner("design did not confirm 'clk %d' - is it"
+                           " really running at %d MHz?  Start it with:"
+                           " %s run --freq %d" % (mhz, mhz, sys.argv[0], mhz))
+            if set_baud and not clk_confirmed:
+                # Switching baud with wrong clock math bricks the link
+                # (the design picks a divider for a clock it is not at),
+                # so refuse rather than strand the session.
+                banner("skipping --baud %d until the clock is confirmed"
+                       % set_baud)
+                set_baud = None
+            if set_baud and clk_confirmed and self.target and \
+                    self.target[2] != 64_000_000:
+                # The clock announce just proved the design answers at the
+                # bridge's current rate - ask for the switch on that live
+                # link (probing first could strand us at a guessed rate).
+                self.port.write(b"baud %d\r" % set_baud)
+            elif set_baud:
+                # The design may already be at this rate (reattaching to a
+                # live session that switched earlier): probe there first.
+                # A design at the high rate would see the 115200-framed
+                # command as line noise, and one at 115200 sees the high
+                # rate the same way - only the matching rate answers with
+                # a clean prompt.
+                if self._probe_baud(set_baud):
+                    banner("link already at %d baud" % set_baud)
+                else:
+                    self.port.write(b"\rbaud %d\r" % set_baud)
             watching = [stdin_fd, self.port.fd]
             while True:
                 # While a filesystem frame is half-collected the keyboard
@@ -711,6 +1035,15 @@ class Board:
                             tail = b""
                             self._console_send_song(interactive, stdin_fd,
                                                     saved)
+                            continue
+                        m = BAUD_MARK_RE.search(window)
+                        if m:
+                            # The design is switching its UART divider;
+                            # follow it on this side.
+                            tail = b""
+                            self._console_set_baud(int(m.group(1)),
+                                                   interactive, stdin_fd,
+                                                   saved)
                             continue
                         tail = window[-32:]
                 if stdin_fd in readable:
@@ -919,6 +1252,10 @@ def main(argv=None):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-p", "--port", default=argparse.SUPPRESS,
                         help="serial port (default: autodetect, or $TQV_PORT)")
+    common.add_argument("--baud", type=int, default=argparse.SUPPRESS,
+                        help="ask the design to move the console link to this "
+                             "baud rate once it is up (the design resets to "
+                             "115200); e.g. --baud 1000000")
     common.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
                         help="show protocol progress")
 
@@ -979,6 +1316,19 @@ def main(argv=None):
                    help="stop the design and hand the board back to its REPL")
 
     args = parser.parse_args(argv)
+
+
+    baud_req = getattr(args, "baud", None)
+
+    if baud_req and not 7000 <= baud_req <= 3_000_000:
+
+        parser.error("--baud %d is outside the link's range: the RP2350 "
+
+                     "UART tops out at 3000000 (48MHz/16) and the design "
+
+                     "is ISR-bound above ~1-2M; 1000000 is the tested "
+
+                     "sweet spot" % baud_req)
     args.port = getattr(args, "port", None)
     args.verbose = getattr(args, "verbose", False)
 
@@ -1040,7 +1390,7 @@ def main(argv=None):
             board.target = (args.design, args.latency, int(args.freq * 1_000_000))
             banner("attaching to %s" % path)
             attach_fs(board, args)
-            stopped = board.console()
+            stopped = board.console(set_baud=getattr(args, "baud", None))
             if stopped:
                 board.leave_raw_repl()
                 banner("design stopped")
@@ -1096,7 +1446,8 @@ def main(argv=None):
             return 0
 
         attach_fs(board, args)
-        stopped = board.console(settle=3.0)
+        stopped = board.console(settle=3.0,
+                                set_baud=getattr(args, "baud", None))
         if stopped:
             board.leave_raw_repl()
             banner("design stopped")

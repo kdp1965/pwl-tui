@@ -15,6 +15,7 @@
 #include "Tui.h"
 #include "PwlSynth.h"
 #include "MidiFile.h"
+#include "PrismWaves.h"
 #include "Mid2Pwl.h"
 
 extern "C" {
@@ -170,11 +171,13 @@ static const PwlCmd_t s_TuiCmds[] =
   { "adsr",     0, 5, &CPwlSynth::Legacy, "adsr <ch> <a d s r|off>", "Amp envelope: rates 0-15, sustain 0-7" },
   { "amp",      0, 2, &CPwlSynth::Amp,    "amp <ch|chN> <v|pct>", "Set voice amp, or MIDI-ch mix gain (amp ch7 50%)" },
   { "automap",  0, 0, &CPwlSynth::Automap,"automap",              "Guess melody/bass/pad/drums from the MIDI" },
+  { "baud",     0, 1, &CPwlSynth::Legacy, "baud [rate]",          "Console link rate (tqv.py follows the switch)" },
   { "bend",     0, 3, &CPwlSynth::Legacy, "bend <ch> up|down <r>","Period sweep (pitch bend)" },
   { "brighten", 0, 2, &CPwlSynth::Legacy, "brighten <ch> <rate>", "Sweep slopes up (lowpass opening)" },
   { "cat",      0, 1, &CPwlSynth::Legacy, "cat <file>",           "Print a host file" },
   { "chord",    0, 4, &CPwlSynth::Legacy, "chord <n1> [n2 n3 n4]","Play notes on channels 0..3" },
   { "clear",    0, 0, &CPwlSynth::Clear,  "clear",                "Clear the command window" },
+  { "clk",      0, 1, &CPwlSynth::Legacy, "clk [MHz]",            "Real project clock for playback/baud math" },
   { "close",    0, 0, &CPwlSynth::Close,  "close",                "Close the active source tab" },
   { "cnt",      0, 0, &CPwlSynth::Legacy, "cnt",                  "Read the 24-bit sample counter" },
   { "convert",  0, 0, &CPwlSynth::Convert,"convert",              "Build the MIDI tab's seq table in RAM" },
@@ -202,7 +205,9 @@ static const PwlCmd_t s_TuiCmds[] =
   { "rd",       0, 1, &CPwlSynth::Legacy, "rd <off>",             "Raw 16-bit register read" },
   { "regs",     0, 0, &CPwlSynth::Legacy, "regs",                 "Dump readable registers, all channels" },
   { "save",     0, 1, &CPwlSynth::Save,   "save [file.pwl|.c]",   "Write the conversion to the host" },
+  { "scope",    0, 1, &CPwlSynth::Scope,  "scope on|off",         "PRISM dutymeter waveform in the Notes tab (needs the uo_out[7]->ui_in[0] jumper)" },
   { "selftest", 0, 0, &CPwlSynth::Legacy, "selftest",             "Register access self test" },
+  { "skip",     0, 3, &CPwlSynth::Skip,   "skip chN <bars|off>",  "Rest a channel's bars (1-based, -1 = last bar)" },
   { "snare",    0, 1, &CPwlSynth::Legacy, "snare [ch]",           "Snare one-shot (default ch 3)" },
   { "stereo",   0, 1, &CPwlSynth::Legacy, "stereo off|on|pos",    "Mono / stereo voice / stereo position" },
   { "studio",   0, 0, &CPwlSynth::Studio, "studio",               "Instrument studio tab (CTRL-W focuses it)" },
@@ -292,6 +297,18 @@ static void pwl_note_clear_sink(void)
     g_pPwl->NotesClear();
 }
 
+// PRISM dutymeter scope (tui/PrismWaves.cxx).  A file-static instance:
+// CPwlSynth only routes the service hook and the command at it.
+static CPrismWaves s_Waves;
+
+extern "C" uint32_t prism_get_count1(void);   // raw diag in Scope()
+
+static void pwl_scope_hook(void)
+{
+  if (g_pPwl != NULL)
+    g_pPwl->ScopeService(false);    // called from the player wait loops
+}
+
 void CPwlSynth::InstallStdoutHook(void)
 {
   m_OutLen  = 0;
@@ -309,6 +326,9 @@ void CPwlSynth::RemoveStdoutHook(void)
     pwl_note_out = NULL;
   if (pwl_note_clear == pwl_note_clear_sink)
     pwl_note_clear = NULL;
+  if (pwl_scope_service == pwl_scope_hook)
+    pwl_scope_service = NULL;
+  s_Waves.Disable();                    // curses is going away
 }
 
 void CPwlSynth::StdoutChunk(const char *buffer, int length)
@@ -463,6 +483,10 @@ static void notes_set_rows(int n)
 // tracks always fill the tab and never need scrolling.
 static int notes_rows_for(int winRows)
 {
+  if (s_Waves.Enabled())
+    winRows -= PRISMWAVES_REGION;       // the scope + frame row
+  if (winRows < PWL_NUM_CHANNELS)
+    winRows = PWL_NUM_CHANNELS;
   return winRows / PWL_NUM_CHANNELS;
 }
 
@@ -1193,6 +1217,11 @@ int CPwlSynth::Studio(int argc, char *argv[])
 
 void CPwlSynth::IdlePoll(void)
 {
+  // The PRISM scope samples/paints from the player wait loops during
+  // songs; idle time (held notes, the studio keyboard) pumps it here
+  if (s_Waves.Enabled())
+    ScopeService(true);
+
   uint32_t now;
   int      ch, fired = 0;
 
@@ -1252,7 +1281,7 @@ void CPwlSynth::IdlePoll(void)
       if (++s_SongIdx >= s_SongCount)
         s_SongPlaying = 0;              // the take is over
       else
-        s_SongNextAt += (uint32_t)s_SongEvs[s_SongIdx].dt * 1000u;
+        s_SongNextAt += us_ticks((uint32_t)s_SongEvs[s_SongIdx].dt * 1000u);
     }
     if (sound && instr_tab_active(m_pParent))
       m_pParent->DrawSourceWindow();    // sound change repaints the rows
@@ -1314,7 +1343,7 @@ void CPwlSynth::InstrSetNote(int midi)
   {
     // note mode: audition every pitch change for the set duration
     pwl_note_on(ch, midi, s_InstrVel[ch]);
-    s_InstrOffAt[ch] = read_time() + (uint32_t)s_InstrDur[ch] * 1000u;
+    s_InstrOffAt[ch] = read_time() + us_ticks((uint32_t)s_InstrDur[ch] * 1000u);
     s_InstrOffPending[ch] = 1;
   }
   else if (pwl_ch[ch].on)
@@ -1860,7 +1889,7 @@ int CPwlSynth::ProcessKey(int key)
       {
         // play-for-duration: schedule the gate-off (IdlePoll fires it)
         s_InstrOffAt[s_InstrCh] = read_time() +
-                                  (uint32_t)s_InstrDur[s_InstrCh] * 1000u;
+                                  us_ticks((uint32_t)s_InstrDur[s_InstrCh] * 1000u);
         s_InstrOffPending[s_InstrCh] = 1;
       }
       break;
@@ -1966,7 +1995,7 @@ int CPwlSynth::ProcessKey(int key)
         pwl_note_off(s_InstrCh);            //   the gate begins closed
         s_SongIdx = 0;
         s_SongPlaying = 1;
-        s_SongNextAt = read_time() + (uint32_t)s_SongEvs[0].dt * 1000u;
+        s_SongNextAt = read_time() + us_ticks((uint32_t)s_SongEvs[0].dt * 1000u);
       }
       InstrSongRepaint();
       s_InstrSkipDraw = 1;
@@ -2288,6 +2317,104 @@ int CPwlSynth::Notes(int argc, char *argv[])
   (void)argv;
 
   return EnsureNotesTab() != NULL ? OK : -1;
+}
+
+// 'scope on|off': arm the PRISM dutymeter (chroma load + hook) or park
+// it.  The Notes tab re-splits its rows around the reserved region on
+// the next full draw.
+int CPwlSynth::Scope(int argc, char *argv[])
+{
+  if (argc < 2)
+  {
+    CmdPrintf("scope is %s (PRISM dutymeter; needs the uo_out[7] ->"
+              " ui_in[0] jumper)\n", s_Waves.Enabled() ? "on" : "off");
+    return OK;
+  }
+  if (strcmp(argv[1], "on") == 0)
+  {
+    if (s_Waves.Enabled())
+    {
+      CmdPrintf("scope is already on\n");
+      return OK;
+    }
+    int res = s_Waves.Enable();
+
+    if (res)
+    {
+      CmdPrintf("PRISM dutymeter chroma load failed (mask 0x%x)\n", res);
+      return -1;
+    }
+    pwl_scope_service = pwl_scope_hook;
+
+    // Raw diagnostic: two count1 readings 2ms apart say instantly
+    // whether the jumper is feeding us (duty 0 = stuck low / no jumper,
+    // 255 = stuck high, moving values = decoding)
+    {
+      uint32_t c0 = prism_get_count1();
+      uint32_t t0 = read_time();
+
+      while ((uint32_t)(read_time() - t0) < us_ticks(2000u))
+        ;
+      uint32_t c1 = prism_get_count1();
+      uint32_t dh = (c0 - c1) & 0xFFFFFFu;
+      uint32_t dt = read_time() - t0;
+
+      CmdPrintf("dutymeter: count1 %06lx -> %06lx, duty %lu/255 over 2ms\n",
+                (unsigned long)c0, (unsigned long)c1,
+                (unsigned long)(dt ? dh * 4u / dt : 0));
+    }
+    EnsureNotesTab();
+    CmdPrintf("scope on: PRISM decoding uo_out[7] through the jumper\n");
+    return OK;
+  }
+  pwl_scope_service = NULL;
+  s_Waves.Disable();
+  if (m_pParent != NULL)
+    m_pParent->DrawSourceWindow();
+  CmdPrintf("scope off\n");
+  return OK;
+}
+
+// Hook target: the scope runs WITH the music only (the player wait
+// loops call this with fromIdle=false).  The first hook tick of a song
+// hides the cursor for the whole playback and rebases the dutymeter
+// (idle drains count1 - nobody samples between songs); the first idle
+// tick after the song only hands the cursor back to the prompt.
+void CPwlSynth::ScopeService(bool fromIdle)
+{
+  CTab   *pTab;
+  WINDOW *pWnd = NULL;
+  int     top = 0, cols = 0;
+
+  if (fromIdle)
+  {
+    if (g_TuiCursorSuppress)
+    {
+      g_TuiCursorSuppress = 0;      // playback over: show the cursor
+      curs_set(1);
+    }
+    return;                         // no idle sampling or painting
+  }
+
+  if (!g_TuiCursorSuppress)
+  {
+    g_TuiCursorSuppress = 1;        // playback: cursor hidden
+    curs_set(0);
+    s_Waves.Rebase();
+  }
+
+  pTab = (m_pParent != NULL) ? m_pParent->GetActiveSrcTab() : NULL;
+  if (pTab != NULL && pTab->SourceContext() == &s_NotesCtxMarker &&
+      (pWnd = pTab->GetWindow()) != NULL)
+  {
+    int rows;
+
+    getmaxyx(pWnd, rows, cols);
+    top = rows - PRISMWAVES_REGION;
+    if (top < 1)
+      pWnd = NULL;
+  }
+  s_Waves.Service(pWnd, top, cols);
 }
 
 int CPwlSynth::Watch(int argc, char *argv[])
@@ -2729,6 +2856,101 @@ int CPwlSynth::Inst(int argc, char *argv[])
   }
   pMidi->m_Cvt.inst[role] = (uint8_t)idx;
   CvtChanged(pMidi);
+  return OK;
+}
+
+// 'skip chN 1,-1' - rest a MIDI channel for whole bars: the notes are
+// left out of the conversion while everything else keeps its absolute
+// time, so the bar plays as silence instead of closing up.  Bars are
+// 1-based; negative counts from the end (-1 = last bar).  An optional
+// 'bar'/'bars' word is allowed ('skip ch0 bar 1,-1').  'skip chN off'
+// clears; bare 'skip' lists.  Round-trips through the cfg as SKIPn=.
+int CPwlSynth::Skip(int argc, char *argv[])
+{
+  CMidiFile *pMidi = ActiveMidi(true);
+
+  if (pMidi == NULL)
+    return -1;
+
+  MidiCvt_t *cvt = &pMidi->m_Cvt;
+  bool changed = false;
+
+  if (argc >= 2 && argv[1][0] == 'c' && argv[1][1] == 'h' &&
+      argv[1][2] >= '0' && argv[1][2] <= '9')
+  {
+    int c = atoi(&argv[1][2]);
+    int ai = 2;
+
+    if (c > 15)
+    {
+      CmdPrintf("MIDI channels are 0-15\n");
+      return -1;
+    }
+    if (ai < argc && (strcmp(argv[ai], "bar") == 0 ||
+                      strcmp(argv[ai], "bars") == 0))
+      ai++;
+    if (ai < argc)
+    {
+      if (strcmp(argv[ai], "off") == 0 || strcmp(argv[ai], "-") == 0)
+        cvt->skip_cnt[c] = 0;
+      else
+      {
+        const char *v = argv[ai];
+
+        cvt->skip_cnt[c] = 0;
+        while (*v != 0 && cvt->skip_cnt[c] < 8)
+        {
+          int bar = atoi(v);
+
+          if (bar == 0)
+          {
+            CmdPrintf("bars are 1-based (-1 = last); '%s'?\n", argv[ai]);
+            return -1;
+          }
+          cvt->skip_bars[c][cvt->skip_cnt[c]++] = (int16_t)bar;
+          while (*v != 0 && *v != ',')
+            v++;
+          if (*v == ',')
+            v++;
+        }
+      }
+      changed = true;
+    }
+  }
+  else if (argc >= 2)
+  {
+    CmdPrintf("usage: skip chN <bars|off>  (e.g. 'skip ch0 1,-1')\n");
+    return -1;
+  }
+
+  char line[120];
+  int n = 0, i;
+
+  line[0] = 0;
+  for (i = 0; i < 16; i++)
+    if (cvt->skip_cnt[i] > 0)
+    {
+      n += snprintf(&line[n], sizeof(line) - n, " ch%d:", i);
+      for (int k = 0; k < cvt->skip_cnt[i] && n < (int)sizeof(line) - 8;
+           k++)
+        n += snprintf(&line[n], sizeof(line) - n, "%s%d", k ? "," : "",
+                      cvt->skip_bars[i][k]);
+    }
+  CmdPrintf("rested bars:%s\n", line[0] ? line : " (none)");
+  for (i = 0; i < 16; i++)
+    for (int k = 0; k < cvt->skip_cnt[i]; k++)
+    {
+      uint32_t lo, hi;
+      int tot = mid2pwl_skip_window(pMidi, cvt->skip_bars[i][k], &lo, &hi);
+
+      CmdPrintf("  ch%d bar %d -> %lu..%lums (%d bars, tsig %d, div %d,"
+                " max %lu)\n", i, cvt->skip_bars[i][k],
+                (unsigned long)lo, (unsigned long)hi, tot,
+                pMidi->m_TimeSigNum, pMidi->m_Division,
+                (unsigned long)pMidi->m_MaxTicks);
+    }
+  if (changed)
+    CvtChanged(pMidi);                  // autosave + footer + reconvert
   return OK;
 }
 
@@ -3614,7 +3836,8 @@ synth has no program listing to show)
 int CPwlSynth::GetSourceLineCount(void *pCtx)
 {
   if (pCtx == &s_NotesCtxMarker)
-    return PWL_NUM_CHANNELS * s_NoteRows;       // exactly fills the tab
+    return PWL_NUM_CHANNELS * s_NoteRows +      // exactly fills the tab
+           (s_Waves.Enabled() ? PRISMWAVES_REGION : 0);
   if (pCtx == &s_InstrCtxMarker)
     return INSTR_LINES + 5;     // title + rows + help + sounds + song
   if (IsMidiCtx(pCtx))
@@ -3681,6 +3904,15 @@ void CPwlSynth::DrawSourceWindow(void *pCtx, WINDOW *pWnd, int topLine,
                 s_NoteText[ch][which]);
       wattroff(pWnd, COLOR_PAIR(NOTE_PAIR(ch)));
     }
+  }
+
+  if (s_Waves.Enabled())
+  {
+    int wr, wc;
+
+    getmaxyx(pWnd, wr, wc);
+    if (wr > PRISMWAVES_REGION)
+      s_Waves.DrawFrame(pWnd, wr - PRISMWAVES_REGION, wc);
   }
 }
 

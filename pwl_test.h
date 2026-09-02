@@ -31,6 +31,24 @@ extern volatile uint8_t seq_quiet;
 bool seq_quiet_arg(const char *s);
 
 // ==========================================================================
+// Clock + UART link (tqv.py --freq / --baud; 'clk' / 'baud' commands)
+// ==========================================================================
+#define CLOCK_HZ        64000000u   // build-time default; see clock_hz
+extern uint32_t clock_hz;           // the REAL project clock ('clk <MHz>')
+
+// rdtime ticks are clk/64 (true us only at 64MHz): wall-time waits
+// scale their us constants through us_ticks()
+static inline uint32_t us_ticks(uint32_t us)
+{
+    return (uint32_t)(((uint64_t)us * clock_hz) / 64000000u);
+}
+
+#define UART_STATUS     (*(volatile uint32_t *)0x8000084)
+#define UART_BAUD_DIV   (*(volatile uint32_t *)0x8000088)
+#define UART_DIV_MIN    8u          // 8 MBaud at 64MHz - well past useful
+#define UART_DIV_MAX    8191u       // 13 bit register
+
+// ==========================================================================
 // main.c: console plumbing.  The TUI forwards every command it does not
 // implement itself to cli_execute(), with printf output redirected into
 // its command window.
@@ -63,6 +81,11 @@ extern void (*pwl_note_out)(int channel, const char *text);
 // Called at the start of every song / demo (seq_reset): the TUI wipes
 // its note tracks so the new piece starts on empty lines.
 extern void (*pwl_note_clear)(void);
+
+// Called at high rate from the player wait loops.  The TUI installs one
+// while its PRISM dutymeter scope is armed ('scope on'); it samples the
+// decoded duty and paints the Notes-tab waveform.  NULL when off.
+extern void (*pwl_scope_service)(void);
 
 // ==========================================================================
 // TUI entry points

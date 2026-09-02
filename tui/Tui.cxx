@@ -50,6 +50,17 @@
 #include "Tui.h"
 #include "TuiSource.h"
 
+// While the PRISM scope is armed the cursor stays hidden: every cursor
+// restore funnels through this shim, so watch-pane and prompt redraws
+// cannot undo it.
+int g_TuiCursorSuppress;
+
+static inline void tui_curs_show(void)
+{
+  if (!g_TuiCursorSuppress)
+    curs_set(1);
+}
+
 /*
 ==============================================================================
 Local defines
@@ -1268,7 +1279,7 @@ void CTui::DrawSourceWindow(void)
   wmove(m_pCmdwin, m_CursorLine, m_CmdCol);
 
   UpdateWatchWindows();
-  curs_set(1);
+  tui_curs_show();
 }
 
 /*
@@ -1744,7 +1755,7 @@ void CTui::NextWindowFocus(void)
 
   if (!sourceFocus)
   {
-    curs_set(1);
+    tui_curs_show();
     wmove(m_pCmdwin, m_CursorLine, m_CmdCol);
     wnoutrefresh(m_pCmdwin);
     m_NeedUpdate = 1;
@@ -1753,7 +1764,7 @@ void CTui::NextWindowFocus(void)
     m_NeedUpdate = 0;
 
   doupdate();
-  curs_set(1);
+  tui_curs_show();
   m_CursesLock.Release();
 }
 
@@ -1796,7 +1807,7 @@ void CTui::UISetSourceTopLineNo(int lineNo)
   curs_set(0);
   DrawSourceWindow();
   wmove(m_pCmdwin, m_CursorLine, m_CmdCol);
-  curs_set(1);
+  tui_curs_show();
 }
 
 /*
@@ -1865,7 +1876,7 @@ int CTui::ProcessAsSpecialModeKey(int key, char *pBuffer, int maxSize, int &inde
           curs_set(0);
           DrawSourceWindow();
           wmove(m_pCmdwin, m_CursorLine, m_CmdCol);
-          curs_set(1);
+          tui_curs_show();
         }
       }
       return 1;
@@ -2187,7 +2198,7 @@ int CTui::ProcessAsSpecialModeKey(int key, char *pBuffer, int maxSize, int &inde
       DrawSourceWindow();
       doupdate();
       m_NeedUpdate = 0;
-      curs_set(1);
+      tui_curs_show();
       return 1;
 
     // Pause the Watch Window updates
@@ -3208,7 +3219,7 @@ void CTui::MoveFocusWinLeft(void)
    doupdate();
    m_NeedUpdate = 0;
 
-   curs_set(1);
+   tui_curs_show();
 }
 
 /*
@@ -3248,7 +3259,7 @@ void CTui::MoveFocusWinRight(void)
    DrawSourceWindow();
    doupdate();
    m_NeedUpdate = 0;
-   curs_set(1);
+   tui_curs_show();
 }
 
 /*
@@ -3265,7 +3276,7 @@ void CTui::UIWindowPrintString(WINDOW* pWin, int row, int col, const char *pStr)
   wmove(pWin, row, col);
   PrintFormatStr(pWin, row, col, pStr);
   m_NeedUpdate = 1;
-  curs_set(1);
+  tui_curs_show();
 }
 
 /*
@@ -3326,7 +3337,7 @@ void CTui::RunThread(void)
         UpdateWatchWindows();
         count = 0;
         wmove(m_pCmdwin, m_CursorLine, m_CmdCol);
-        //curs_set(1);
+        //tui_curs_show();
       }
 #endif
 

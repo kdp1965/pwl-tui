@@ -9,7 +9,8 @@ PROJECT_NAME ?= pwl_tui
 PROJECT_SOURCES ?= main.c song_paradise.c song_paradise_v.c song_axelf.c \
                    song_axelf_a.c song_gmlast.c song_willie.c \
                    song_skybells.c cxxrt.cpp \
-                   strsafe.c pwl_synth.c tqv_fs.c runtime.c
+                   strsafe.c pwl_synth.c tqv_fs.c runtime.c \
+                   chroma_dutymeter.c prism.c
 
 # Ported ncurses TUI stack (see tui/, copied from prism-test): termcurses
 # VT100 backend over the UART, pdcurses 3.4 core, bare-metal platform
@@ -80,6 +81,12 @@ $(OBJDIR)/%.o: %.c | $(OBJDIR)
 $(OBJDIR)/%.o: %.cpp | $(OBJDIR)
 	@echo "Compiling $(notdir $<)..."
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# The PRISM driver builds from the SDK submodule (the dutymeter scope
+# talks to peripheral 8 cross-peripheral)
+$(OBJDIR)/prism.o: $(TINYQV_SDK)/peripherals/prism.c $(TINYQV_SDK)/peripherals/prism.h | $(OBJDIR)
+	@echo "Compiling $(notdir $<)..."
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 # The pwl_synth driver builds from the SDK source tree (compiled here
 # rather than into tinyQV.a so this app stays self-contained)

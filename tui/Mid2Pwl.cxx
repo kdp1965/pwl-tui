@@ -129,6 +129,50 @@ static uint8_t drum_kind(int n)
   return 0;
 }
 
+// 'skip chN <bars>': is this onset inside a rested bar?  Bars are
+// 1-based; negative indexes count from the song's end (-1 = last bar).
+// The note is simply not collected - every other note keeps its
+// absolute time, so the bar plays as rests instead of closing up.
+int mid2pwl_skip_window(const CMidiFile *pMidi, int bar,
+                        uint32_t *lo, uint32_t *hi);
+
+// Resolve one 'skip' bar (negative = from the end) to its wall-clock
+// window; returns the total bar count (0 = unresolvable)
+int mid2pwl_skip_window(const CMidiFile *pMidi, int bar,
+                        uint32_t *lo, uint32_t *hi)
+{
+  // A bar is num beats of 4/den quarters (6/8 = 3 quarters, NOT 6):
+  // the denominator matters or every window is off by its ratio
+  uint32_t num = pMidi->m_TimeSigNum ? pMidi->m_TimeSigNum : 4;
+  uint32_t den = pMidi->m_TimeSigDen ? pMidi->m_TimeSigDen : 4;
+  uint32_t barTicks = (uint32_t)pMidi->m_Division * num * 4u / den;
+
+  if (barTicks == 0)
+    barTicks = (uint32_t)pMidi->m_Division * 4u;
+
+  // Negative bars count back from the LAST NOTE's bar, not the file's
+  // padded tick span - MIDI files love a couple of silent bars at the
+  // end, and "-1 = a bar of nothing" helps nobody
+  uint32_t last_on = pMidi->m_NoteCount
+      ? pMidi->m_Notes[pMidi->m_NoteCount - 1].on_ms : 0;
+  int totalBars = 1;
+
+  while (totalBars < 4096 &&
+         pMidi->TickToMs((uint32_t)totalBars * barTicks) <= last_on)
+    totalBars++;
+
+  if (bar < 0)
+    bar = totalBars + 1 + bar;
+  if (bar < 1 || bar > totalBars)
+  {
+    *lo = *hi = 0;
+    return totalBars;
+  }
+  *lo = pMidi->TickToMs((uint32_t)(bar - 1) * barTicks);
+  *hi = pMidi->TickToMs((uint32_t)bar * barTicks);
+  return totalBars;
+}
+
 // All of one MIDI channel's notes (already onset-sorted in m_Notes).
 // Notes whose ONSET falls before the trim point are dropped and the
 // survivors are rebased to it - the setup events sit at t=0, so without
@@ -137,15 +181,41 @@ static uint8_t drum_kind(int n)
 static int chan_notes(const CMidiFile *pMidi, int chan, Nt *out, int max)
 {
   uint32_t trim = pMidi->BeatToMs(pMidi->m_Cvt.trim_beats);
-  int n = 0;
+  uint32_t sk_lo[8], sk_hi[8];
+  int nSk = 0, n = 0;
 
   if (chan < 0)
     return 0;
+
+  // Resolve the channel's rested-bar windows ONCE - resolving per note
+  // walked the tempo map half a million times and read as a hang
+  if (chan <= 15)
+    for (int k = 0; k < pMidi->m_Cvt.skip_cnt[chan]; k++)
+    {
+      uint32_t lo, hi;
+
+      mid2pwl_skip_window(pMidi, pMidi->m_Cvt.skip_bars[chan][k],
+                          &lo, &hi);
+      if (hi > lo)
+      {
+        sk_lo[nSk] = lo;
+        sk_hi[nSk] = hi;
+        nSk++;
+      }
+    }
+
   for (uint32_t i = 0; i < pMidi->m_NoteCount && n < max; i++)
   {
     const MidiNote_t *src = &pMidi->m_Notes[i];
+    int rest = 0;
 
-    if (src->chan == chan && src->on_ms >= trim)
+    for (int k = 0; k < nSk; k++)
+      if (src->on_ms >= sk_lo[k] && src->on_ms < sk_hi[k])
+      {
+        rest = 1;
+        break;
+      }
+    if (src->chan == chan && src->on_ms >= trim && !rest)
     {
       out[n].on = src->on_ms - trim;
       out[n].off = src->off_ms - trim;

@@ -78,6 +78,7 @@ class CPwlSynth : public CTuiSource
     int                 Close(int argc, char *argv[]);    // close active tab
     int                 Notes(int argc, char *argv[]);    // note tracks tab
     int                 Watch(int argc, char *argv[]);    // select watch channel
+    int                 Scope(int argc, char *argv[]);    // PRISM dutymeter scope
     int                 Studio(int argc, char *argv[]);   // instrument studio tab
     int                 Open(int argc, char *argv[]);     // MIDI file tab
 
@@ -91,6 +92,7 @@ class CPwlSynth : public CTuiSource
     int                 Convert(int argc, char *argv[]);  // build the seq table
     int                 Play(int argc, char *argv[]);     // RAM seq / .pwl file
     int                 Save(int argc, char *argv[]);     // write .pwl / .c
+    int                 Skip(int argc, char *argv[]);   // rest a channel's bars
     int                 Trim(int argc, char *argv[]);     // cut the intro
 
   /* Stdout redirection: legacy printf output -> command window */
@@ -103,6 +105,7 @@ class CPwlSynth : public CTuiSource
     int                 CmdPrintf(const char *fmt, ...);
     void                NoteChunk(int channel, const char *text);
     void                NotesClear(void);      // new song: wipe the tracks
+    void                ScopeService(bool fromIdle);  // dutymeter hook
 
   private:
     void                AddTuiSortItem(TuiSortList_t *pList, const char *pStr);

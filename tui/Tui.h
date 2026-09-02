@@ -76,6 +76,9 @@
 #define  SYNTAX_PAIR_NOTES_VOCAL     13    /* TinyQV port: bright yellow
                                             * melody notes in the Notes tab */
 
+// Cursor-restore gate (tui/Tui.cxx); the PRISM scope sets it
+extern int g_TuiCursorSuppress;
+
 class CTuiSource;
 
 /*

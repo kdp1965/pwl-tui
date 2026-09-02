@@ -44,6 +44,8 @@ int                  mid2pwl_inst_default(int role);
 // Build pMidi->m_Seq from pMidi->m_Notes + m_Cvt.  Returns the event
 // count (>= 1, ends with EV_END) or -1 with err filled.
 int  mid2pwl_convert(CMidiFile *pMidi, char *err, int errLen);
+int  mid2pwl_skip_window(const CMidiFile *pMidi, int bar,
+                         uint32_t *lo, uint32_t *hi);   // resolves -N
 
 // Solo audition: one MIDI channel's line, rebased to its first note
 // (leading rests skipped), on voice 2 with the given instrument -

@@ -28,6 +28,7 @@
 // notes print inline as before (see pwl_test.h).
 // ==========================================================================
 void (*pwl_note_out)(int channel, const char *text);
+void (*pwl_scope_service)(void);
 void (*pwl_note_clear)(void);
 
 // 'play q' / 'demo <n> q': no note streaming while the song runs (the
@@ -109,6 +110,9 @@ int cli_split(char *line, char *argv[], int max)
     }
     return argc;
 }
+
+// The REAL project clock; tqv.py --freq announces it via 'clk'
+uint32_t clock_hz = CLOCK_HZ;
 
 static bool parse_u32(const char *s, uint32_t *out)
 {
@@ -318,10 +322,18 @@ int seq_play(const seq_ev_t *ev, const char *name)
     seq_reset();
     int stopped = 0;
 
+    // Feed-budget bookkeeping: service cost accrues in pwl_env_service,
+    // event-dispatch cost here (EV_VIB excluded - it blocks by design)
+    pwl_svc_ticks = pwl_svc_max = pwl_svc_calls = 0;
+    uint32_t evt_ticks = 0, evt_max = 0, evt_n = 0;
+    uint32_t song_t0 = read_time();
+
     for (; ev->cmd != EV_END && !stopped; ++ev) {
         uint32_t start = read_time();
-        while ((uint32_t)(read_time() - start) < (uint32_t)ev->dt_ms * 1000u) {
+        while ((uint32_t)(read_time() - start) < us_ticks((uint32_t)ev->dt_ms * 1000u)) {
             pwl_env_service();
+            if (pwl_scope_service)
+                pwl_scope_service();
             if (uart_getc() != -1) {
                 stopped = 1;
                 break;
@@ -329,6 +341,8 @@ int seq_play(const seq_ev_t *ev, const char *name)
         }
         if (stopped)
             break;
+
+        uint32_t et0 = read_time();
 
         switch (ev->cmd) {
         case EV_ON:
@@ -410,8 +424,10 @@ int seq_play(const seq_ev_t *ev, const char *name)
                 for (int half = 0; half < 2 && !stopped; ++half) {
                     pwl_write(ev->ch, PWL_REG_PERIOD, half ? lo : hi);
                     uint32_t vs = read_time();
-                    while ((uint32_t)(read_time() - vs) < 48000u) {
+                    while ((uint32_t)(read_time() - vs) < us_ticks(48000u)) {
                         pwl_env_service();
+                        if (pwl_scope_service)
+                            pwl_scope_service();
                         if (uart_getc() != -1) {
                             stopped = 1;
                             break;
@@ -424,9 +440,40 @@ int seq_play(const seq_ev_t *ev, const char *name)
         }
         default: break;
         }
+        if (ev->cmd != EV_VIB) {
+            uint32_t edt = read_time() - et0;
+
+            evt_ticks += edt;
+            evt_n++;
+            if (edt > evt_max)
+                evt_max = edt;
+        }
     }
     pwl_all_off();
-    printf("\n%s\n", stopped ? "stopped" : "done");
+    {
+        // rdtime ticks are 64MHz-referenced; convert to real us
+        uint32_t wall = read_time() - song_t0;
+        uint32_t sv   = (uint32_t)(((uint64_t)pwl_svc_ticks * 64u) /
+                                   (clock_hz / 1000000u));
+        uint32_t av10 = pwl_svc_calls
+                        ? (uint32_t)(((uint64_t)sv * 10u) / pwl_svc_calls) : 0;
+        uint32_t mx   = (uint32_t)(((uint64_t)pwl_svc_max * 64u) /
+                                   (clock_hz / 1000000u));
+        uint32_t emx  = (uint32_t)(((uint64_t)evt_max * 64u) /
+                                   (clock_hz / 1000000u));
+        uint32_t pc10 = wall ? (uint32_t)(((uint64_t)(pwl_svc_ticks +
+                                                      evt_ticks) * 1000u) /
+                                          wall) : 0;
+
+        printf("\npwl feed: %lu svc calls, avg %lu.%luus, max %luus; "
+               "%lu events, max %luus; CPU %lu.%lu%%\n",
+               (unsigned long)pwl_svc_calls,
+               (unsigned long)(av10 / 10), (unsigned long)(av10 % 10),
+               (unsigned long)mx, (unsigned long)evt_n,
+               (unsigned long)emx,
+               (unsigned long)(pc10 / 10), (unsigned long)(pc10 % 10));
+    }
+    printf("%s\n", stopped ? "stopped" : "done");
     return stopped;
 }
 
@@ -450,7 +497,7 @@ static void demo_tour(void)
             pwl_note_on(0, phrase[n], 63);
             note_out(0, note_name(phrase[n]));
             uint32_t start = read_time();
-            while ((uint32_t)(read_time() - start) < 280000u) {
+            while ((uint32_t)(read_time() - start) < us_ticks(280000u)) {
                 if (uart_getc() != -1) {
                     pwl_all_off();
                     printf("\nstopped\n");
@@ -1185,6 +1232,8 @@ static void cmd_help(void)
 "PWL synth CLI - notes are names (C4, A#3, Eb2) or MIDI numbers\n"
 "  note <ch> <note> [amp]   play a note (amp 0-63, default 63)\n"
 "  off [ch]                 note off (no arg: all channels)\n"
+"  clk [MHz]                real project clock (tqv.py --freq sets it)\n"
+"  baud [rate]              console link rate (tqv.py follows the switch)\n"
 "  chord <n1> [n2 n3 n4]    play notes on channels 0..3\n"
 "  wave <ch> <preset>       set waveform ('wave list' lists presets)\n"
 "  detune <ch> <n|off>      auto-detune strength (semitone offset)\n"
@@ -1517,6 +1566,52 @@ void cli_execute(int argc, char *argv[])
                    (unsigned long)pwl_envlog[i].t, pwl_envlog[i].tag,
                    pwl_envlog[i].val);
         pwl_envlog_n = 0;
+    } else if (!strcmp(cmd, "clk")) {
+        uint32_t mhz = 0;
+
+        if (argc > 1) {
+            if (!parse_u32(argv[1], &mhz) || mhz < 1 || mhz > 200) {
+                printf("clk: expected MHz (1-200)\n");
+                return;
+            }
+            clock_hz = mhz * 1000000u;
+        }
+        printf("clock %lu.%02lu MHz (playback and baud math; tqv.py"
+               " --freq announces it)\n",
+               (unsigned long)(clock_hz / 1000000u),
+               (unsigned long)((clock_hz % 1000000u) / 10000u));
+    } else if (!strcmp(cmd, "baud")) {
+        // Writable 13-bit divider at 0x8000088 (reset 555 = 115200 at
+        // 64MHz).  Print a marker, drain, switch - tqv.py follows.
+        uint32_t rate = 0, div;
+
+        if (argc < 2) {
+            div = UART_BAUD_DIV;
+            printf("baud %lu (divider %lu); 'baud <rate>' changes it\n",
+                   (unsigned long)(clock_hz / (div + 1)),
+                   (unsigned long)div);
+            return;
+        }
+        if (!parse_u32(argv[1], &rate) || rate == 0)
+            return;
+        div = (clock_hz + rate / 2) / rate;
+        if (div > 0) div -= 1;
+        if (div < UART_DIV_MIN) div = UART_DIV_MIN;
+        if (div > UART_DIV_MAX) div = UART_DIV_MAX;
+        rate = clock_hz / (div + 1);
+
+        printf("switching to %lu baud (divider %lu)\n",
+               (unsigned long)rate, (unsigned long)div);
+        printf("\x05TQVBAUD:%lu\x05\n", (unsigned long)rate);
+        {
+            uint32_t idle_since = read_time();
+
+            while (read_time() - idle_since < us_ticks(5000u)) {
+                if (UART_STATUS & 1u)           // transmitter busy
+                    idle_since = read_time();
+            }
+        }
+        UART_BAUD_DIV = div;
     } else if (!strcmp(cmd, "regs"))
         cmd_regs();
     else if (!strcmp(cmd, "selftest"))

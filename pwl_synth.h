@@ -331,6 +331,9 @@ void pwl_set_adsr(int channel, uint8_t attack, uint8_t decay,
 void pwl_adsr_off(int channel);
 void pwl_env_service(void);
 
+// Feed-budget counters (rdtime ticks; seq_play resets and reports)
+extern uint32_t pwl_svc_ticks, pwl_svc_max, pwl_svc_calls;
+
 // --------------------------------------------------------------------------
 // Pitch envelope: every note starts offset_semis away and hardware-
 // sweeps to the real pitch.  Because the {exp, mantissa} period format

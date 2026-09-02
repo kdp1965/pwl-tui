@@ -487,10 +487,27 @@ def run(design, latency, freq):
         uart_out = UART(1, baudrate=baud, tx=Pin(GPIO_UI_IN[7]), rx=None)
     else:
         baud = int(115200 * freq / 64000000)
-        uart_out = UART(1, baudrate=baud, tx=Pin(GPIO_UI_IN[7]), rx=None)
-    uart_in = UART(0, baudrate=baud, rx=Pin(GPIO_UO_OUT[0]), tx=None)
+        uart_out = UART(1, baudrate=baud, tx=Pin(GPIO_UI_IN[7]), rx=None,
+                        txbuf=1024)
+    # Deep RX ring, sized here because it CANNOT be changed later: this
+    # MicroPython's UART leaves RX dead after any .init() or second
+    # construction, so these first objects serve every later baud rate
+    # (tqv.py's rebridge retunes the PL011 divisor underneath them).  At
+    # 2Mbaud the 256 byte default is a single millisecond of headroom -
+    # one garbage collection pause in the bridge loop would drop bytes.
+    uart_in = UART(0, baudrate=baud, rx=Pin(GPIO_UO_OUT[0]), tx=None,
+                   rxbuf=16384)
     time.sleep(0.001)
     clk = PWM(Pin(GPIO_PROJECT_CLK), freq=freq, duty_u16=32768)
+
+    # Root the design's lifelines in module globals: run() returning (the
+    # Ctrl-Q q stop) must not hand the clock PWM or the UARTs to the
+    # garbage collector - the design keeps running across a detach, and
+    # tqv.py's baud switch stops this loop, retunes the SAME UART objects
+    # and re-enters it.
+    global _tqv_clk, _tqv_rst_n, _tqv_uart_in, _tqv_uart_out
+    _tqv_clk, _tqv_rst_n = clk, rst_n
+    _tqv_uart_in, _tqv_uart_out = uart_in, uart_out
 
     try:
         micropython.kbd_intr(-1)  # Disable Ctrl-C

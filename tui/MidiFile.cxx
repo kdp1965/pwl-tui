@@ -94,10 +94,12 @@ CMidiFile::CMidiFile()
   {
     m_Cvt.chan_gain[c] = 100;
     m_Cvt.chan_inst[c] = -1;
+    m_Cvt.skip_cnt[c] = 0;
   }
   for (int r = 0; r < 3; r++)
     m_Cvt.adsr_ovr[r][0] = -1;      // no envelope override
   m_TimeSigNum = 4;
+  m_TimeSigDen = 4;
   memset(m_ChanProg, 0xFF, sizeof(m_ChanProg));
 }
 
@@ -166,6 +168,7 @@ static uint32_t rdvar(const uint8_t **pp, const uint8_t *end)
 }
 
 static uint8_t s_TimeSigNum;    // set by walk_track pass 1 (meta 0x58)
+static uint8_t s_TimeSigDen;    //   with its denominator (1 << p[1])
 
 // Walk one MTrk chunk.  Two passes are made over every track: the first
 // (fill == false) collects the metadata and the tick span, the second
@@ -216,7 +219,12 @@ static void walk_track(MidiTrack_t *trk, const uint8_t *p, const uint8_t *end,
       else if (!fill && type == 0x51 && len >= 3 && *pTempo == 0)
         *pTempo = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
       else if (!fill && type == 0x58 && len >= 1 && p[0] >= 1 && p[0] <= 16)
+      {
         s_TimeSigNum = p[0];    // beats per bar, for 'trim N bars'
+        s_TimeSigDen = 4;
+        if (len >= 2 && p[1] <= 6)
+          s_TimeSigDen = (uint8_t)(1u << p[1]);
+      }
 
       p += len;
       if (type == 0x2F)         // end of track
@@ -787,6 +795,7 @@ bool CMidiFile::Load(const char *path, char *err, int errLen)
 
   if (s_TimeSigNum != 0)
     m_TimeSigNum = s_TimeSigNum;
+    m_TimeSigDen = s_TimeSigDen >= 1 ? s_TimeSigDen : 4;
 
   ok = true;
   free(buf);
@@ -949,6 +958,26 @@ bool CMidiFile::LoadCfg(void)
       if (c < 16)
         m_Cvt.chan_gain[c] = (uint8_t)atoi(val);
     }
+    else if (strncmp(line, "SKIP", 4) == 0 &&
+             line[4] >= '0' && line[4] <= '9')
+    {
+      int c = atoi(&line[4]);
+
+      if (c < 16)
+      {
+        const char *v = val;
+
+        m_Cvt.skip_cnt[c] = 0;
+        while (*v != 0 && m_Cvt.skip_cnt[c] < 8)
+        {
+          m_Cvt.skip_bars[c][m_Cvt.skip_cnt[c]++] = (int16_t)atoi(v);
+          while (*v != 0 && *v != ',')
+            v++;
+          if (*v == ',')
+            v++;
+        }
+      }
+    }
     else if (strncmp(line, "CINST", 5) == 0 &&
              line[5] >= '0' && line[5] <= '9')
     {
@@ -998,6 +1027,14 @@ void CMidiFile::SaveCfg(void) const
   for (i = 0; i < 16; i++)
     if (m_Cvt.chan_inst[i] >= 0)
       fprintf(f, "CINST%d=%s\n", i, mid2pwl_inst(m_Cvt.chan_inst[i])->name);
+  for (i = 0; i < 16; i++)
+    if (m_Cvt.skip_cnt[i] > 0)
+    {
+      fprintf(f, "SKIP%d=", i);
+      for (int k = 0; k < m_Cvt.skip_cnt[i]; k++)
+        fprintf(f, "%s%d", k ? "," : "", m_Cvt.skip_bars[i][k]);
+      fprintf(f, "\n");
+    }
   for (i = 0; i < 3; i++)
   {
     if (m_Cvt.adsr_ovr[i][0] >= 0)

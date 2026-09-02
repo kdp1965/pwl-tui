@@ -4,6 +4,8 @@
 #include "pwl_synth.h"
 #include "csr.h"
 
+extern uint32_t clock_hz;   // real project clock (pwl_test.h / main.c)
+
 #ifdef PWL_ENV_DEBUG
 #include <stdio.h>
 #define ENV_DBG(...) printf(__VA_ARGS__)
@@ -56,12 +58,25 @@ uint16_t pwl_note_fperiod(int midi_note)
 
     int idx = t % 12;
     int oct = t / 12;
-    uint16_t mantissa = pwl_note_mantissa[idx];
+    uint32_t mantissa = pwl_note_mantissa[idx];
+
+    // Scale the 64MHz-referenced period to the real clock (tqv.py
+    // --freq 90): a faster clock needs a longer period for the same
+    // pitch.  Renormalize into the octave exponent on overflow.
+    if (clock_hz != 64000000u) {
+        mantissa = (uint32_t)(((uint64_t)mantissa * clock_hz) / 64000000u);
+        while (mantissa > 1023u && oct > 0) {
+            mantissa >>= 1;
+            oct--;
+        }
+        if (mantissa > 1023u)
+            mantissa = 1023u;
+    }
 
     // The two top octaves step the phase by 2/4: round the mantissa so
     // the period stays an integer number of samples (avoids warble)
     if (oct >= 6)
-        mantissa &= (uint16_t)(-1 << (oct - 5));
+        mantissa &= (uint32_t)(-1 << (oct - 5));
 
     return (uint16_t)(mantissa | ((7 - oct) << 10));
 }
@@ -554,7 +569,36 @@ static void pwl_env_stops(uint32_t now)
     }
 }
 
+// Feed-budget instrumentation: every service call is timed so the
+// player can report what the software stack (ADSR staging, pitch/timbre
+// stop-writes, vibrato/arp LFOs) actually costs - the headroom number
+// any added display/decoder work has to live inside.
+uint32_t pwl_svc_ticks, pwl_svc_max, pwl_svc_calls;
+
+static void pwl_env_service_inner(void);
+
 void pwl_env_service(void)
+{
+    uint32_t t0 = read_time();
+
+    // NOTE: rate-gating this call is a measured NO-OP (A/B on demo 2:
+    // 23.3% CPU ungated vs 23.6% gated at 1kHz) - the per-call cost
+    // scales with the gap, i.e. the inner does fixed work per unit
+    // TIME (catch-up stepping), so fewer calls just do more each.
+    // Cutting the feed for real means deadline-skipping inside.
+
+    pwl_env_service_inner();
+    {
+        uint32_t dt = read_time() - t0;
+
+        pwl_svc_ticks += dt;
+        pwl_svc_calls++;
+        if (dt > pwl_svc_max)
+            pwl_svc_max = dt;
+    }
+}
+
+static void pwl_env_service_inner(void)
 {
     static uint32_t last_write_us;
     uint32_t now = read_time();

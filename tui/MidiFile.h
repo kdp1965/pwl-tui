@@ -93,6 +93,10 @@ typedef struct
                                     //   (100 = unity; 'amp ch7 50')
   int8_t   adsr_ovr[3][4];          // per-role A,D,S,R; A = -1 -> use the
                                     //   instrument's own envelope
+  int16_t  skip_bars[16][8];        // per-channel rested bars, 1-based
+  uint8_t  skip_cnt[16];            //   (negative = from the end;
+                                    //   'skip ch0 1,-1'; notes in those
+                                    //   bars become rests, timing kept)
 } MidiCvt_t;
 
 class CMidiFile
@@ -144,6 +148,7 @@ class CMidiFile
     MidiTempo_t  *m_Tempos;         // the tempo map (>= 1 entry when loaded)
     uint32_t      m_TempoCount;
     uint8_t       m_TimeSigNum;     // beats per bar (meta 0x58; default 4)
+    uint8_t       m_TimeSigDen;     // beat unit (meta 0x58 denominator)
     uint8_t       m_ChanProg[16];   // first program per CHANNEL (0xFF none)
     uint8_t       m_RowsAreChans;   // rows rebuilt per channel (format 0)
 
